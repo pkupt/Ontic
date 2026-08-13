@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ontic</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <!-- 登录屏 -->
+  <div id="login" class="screen hidden">
+    <div class="card login-card">
+      <h1>Ontic</h1>
+      <p class="muted">开源 Ontology 数据平台 · Palantir Foundry 思路复刻</p>
+      <input id="username" placeholder="用户名" value="admin" />
+      <input id="password" type="password" placeholder="密码" value="admin123" />
+      <button id="loginBtn">登录</button>
+      <div id="loginErr" class="err"></div>
+    </div>
+  </div>
+
+  <!-- 主应用 -->
+  <div id="app" class="screen hidden">
+    <header class="topbar">
+      <strong class="brand" onclick="setModule('home')">Ontic</strong>
+      <nav id="modnav"></nav>
+      <div id="omnibar-wrap">
+        <input id="omnibar" placeholder="搜索 类型 / 动作 / 应用 / 管道…" autocomplete="off" oninput="omnibarSearch()" onkeydown="omnibarKey(event)" onfocus="omnibarSearch()"/>
+        <div id="omnibar-list" class="hidden"></div>
+      </div>
+      <button id="bellBtn" class="ghost" onclick="openNotifications()" title="通知">🔔<span id="bellBadge" class="badge hidden"></span></button>
+      <button class="primary sm" onclick="openLauncher()">＋ 新建</button>
+      <span id="who" class="muted"></span>
+      <button id="logoutBtn" class="ghost">退出</button>
+    </header>
+    <div class="layout">
+      <nav id="sidebar"></nav>
+      <main id="content"></main>
+    </div>
+  </div>
+
+  <!-- 新建启动器（对齐 Foundry 创建面板 9028755） -->
+  <div id="launcher" class="modal hidden" onclick="if(event.target===this)closeLauncher()">
+    <div class="modal-box">
+      <div class="row" style="justify-content:space-between;">
+        <strong>新建 / 打开</strong>
+        <button class="ghost sm" onclick="closeLauncher()">✕</button>
+      </div>
+      <input id="launcher_search" placeholder="搜索应用、资源…" oninput="renderLauncher()" style="width:100%;margin:10px 0;" />
+      <div class="launcher-body">
+        <div id="launcher_cats" class="launcher-cats"></div>
+        <div id="launcher_items" class="launcher-items"></div>
+      </div>
+      <p class="muted" style="font-size:12px;margin-top:8px;">提示：快捷键 <code>Shift + N</code> 打开</p>
+    </div>
+  </div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

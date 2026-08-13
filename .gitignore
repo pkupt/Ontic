@@ -1,0 +1,34 @@
+# ---- 数据与运行时状态（含测试期写入的演示行 / API 令牌 / 媒体）----
+data/
+*.db
+*.duckdb
+*.duckdb.wal
+
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# ---- Node / 前端 ----
+node_modules/
+
+# ---- 环境与密钥（绝不上传）----
+.env
+.env.*
+!.env.example
+
+# ---- 日志 / 临时 ----
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# ---- IDE ----
+.idea/
+.vscode/
