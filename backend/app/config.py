@@ -12,6 +12,14 @@ SECRET_KEY = os.environ.get("ONTIC_SECRET_KEY", "dev-secret-change-me-in-prod")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ONTIC_TOKEN_TTL", "1440"))
 
+# 运行环境：dev（默认，宽松）| prod（生产，强制安全项）
+ENV = os.environ.get("ONTIC_ENV", "dev").lower()
+_DEFAULT_SECRET = "dev-secret-change-me-in-prod"
+if ENV == "prod" and (not SECRET_KEY or SECRET_KEY == _DEFAULT_SECRET):
+    raise RuntimeError(
+        "[production] 必须设置强 ONTIC_SECRET_KEY（环境变量）；拒绝使用默认密钥启动。"
+    )
+
 ADMIN_USER = os.environ.get("ONTIC_ADMIN_USER", "admin")
 ADMIN_PASSWORD = os.environ.get("ONTIC_ADMIN_PASSWORD", "admin123")
 

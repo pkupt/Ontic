@@ -32,10 +32,10 @@ def run_sql(sql: str):
     if not tables:
         raise ValueError("查询必须包含 FROM 表")
     known = {ot["backing_table"] for ot in metadata.list_object_types()}
-    snap_re = re.compile(r"^ont__.+__snap_\d+$")
+    snap_re = re.compile(r"^ont__.+__(snap_\d+|ckpt_\d+|branch_[a-zA-Z0-9_]+)$")
     for t in tables:
         if t not in known and not snap_re.match(t):
-            raise ValueError(f"表不在白名单内: {t}（仅可查询已注册对象类型表或管道快照表）")
+            raise ValueError(f"表不在白名单内: {t}（仅可查询已注册对象类型表或版本快照/检查点/分支表）")
     dconn = db.get_duckdb()
     try:
         t0 = time.time()
@@ -178,3 +178,18 @@ def register_endpoint(app, ep: dict):
     if catch is not None and routes[-1] is not routes[catch]:
         route = routes.pop()
         routes.insert(catch, route)
+
+
+def delete_media(name: str):
+    """删除媒体文件（路径穿越防护：仅允许文件名）。"""
+    import os
+    if "/" in name or "\\" in name or ".." in name:
+        raise ValueError("非法文件名")
+    p = MEDIA_DIR / name
+    if not p.is_file():
+        raise ValueError("媒体不存在")
+    try:
+        p.unlink()
+    except OSError as e:
+        raise ValueError(f"删除失败（文件系统拒绝）：{e}") from e
+    return {"ok": True, "deleted": name}

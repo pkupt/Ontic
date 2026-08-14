@@ -16,6 +16,7 @@ class TokenResponse(BaseModel):
 class UserOut(BaseModel):
     username: str
     role: str
+    default_pw: bool = False
 
 
 class QueryRequest(BaseModel):

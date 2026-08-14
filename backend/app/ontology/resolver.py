@@ -37,7 +37,7 @@ def _build_where(node, params: list, props: dict) -> str:
     field = node.get("field")
     if field not in props:
         raise ValueError(f"未知字段: {field}")
-    col = props[field]
+    col = f'"{props[field]}"'  # 引号包裹，避免保留字（如 where）
     o = node.get("op")
     val = node.get("value")
 
@@ -82,7 +82,7 @@ def query_object_set(type_id, query: dict, user: str = None):
     for s in select:
         if s not in props:
             raise ValueError(f"未知查询字段: {s}")
-    cols = [props[s] for s in select]
+    cols = [f'"{props[s]}"' for s in select]
 
     params: list = []
     where = _build_where(query.get("where"), params, props)
@@ -90,7 +90,7 @@ def query_object_set(type_id, query: dict, user: str = None):
 
     ob = query.get("orderBy")
     if ob and ob.get("field") in props:
-        sql += f" ORDER BY {props[ob['field']]} {ob.get('direction', 'ASC').upper()}"
+        sql += f" ORDER BY \"{props[ob['field']]}\" {ob.get('direction', 'ASC').upper()}"
 
     limit = int(query.get("limit", 100))
     offset = int(query.get("offset", 0))

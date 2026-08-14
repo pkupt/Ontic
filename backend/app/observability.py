@@ -7,6 +7,7 @@
   - 事件时间线（23315552）：复用 activity 日志（通知中心已有）。
 """
 import re
+import json
 import datetime
 
 from . import db
@@ -70,19 +71,43 @@ def lineage_for(type_id):
     }
 
 
-# ---- 监控规则（34752748） ----
+def lineage_tables():
+    """表级血缘（B2）：管道步骤的 FROM 表 → target 表，带步骤名。"""
+    edges = []
+    seen = set()
+    for p in metadata.list_pipelines():
+        for step in (p.get("steps") or []):
+            target = step.get("target")
+            if not target:
+                continue
+            t_table = f"ont__{target}"
+            for m in _FROM_RE.finditer(step.get("sql", "")):
+                s_table = m.group(2)
+                key = (s_table, t_table)
+                if key not in seen:
+                    seen.add(key)
+                    edges.append({"source": s_table, "target": t_table,
+                                  "via": p["id"], "step": step.get("name", "")})
+    return {"edges": edges}
+
+
+# ---- 监控规则（34752748）+ E1 事件触发器（autopilot automation-events） ----
 def create_monitor(m: dict):
     mid = (m.get("id") or "").strip()
     if not mid or not m.get("object_type"):
         raise ValueError("id 与 object_type 必填")
     if not metadata.get_object_type(m["object_type"]):
         raise ValueError("对象类型不存在")
+    action_id = m.get("action_id") or None
+    if action_id and not metadata.get_action(action_id):
+        raise ValueError(f"关联动作不存在: {action_id}")
     conn = db.get_metadata_conn()
     conn.execute(
-        """INSERT OR REPLACE INTO monitors (id, name, object_type, metric, op, threshold, enabled)
-           VALUES (?,?,?,?,?,?,?)""",
+        """INSERT OR REPLACE INTO monitors (id, name, object_type, metric, op, threshold, enabled, action_id, action_params)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
         (mid, m.get("name", mid), m["object_type"], m.get("metric", "count"),
-         m.get("op", "gt"), float(m.get("threshold", 100)), 1 if m.get("enabled", True) else 0),
+         m.get("op", "gt"), float(m.get("threshold", 100)), 1 if m.get("enabled", True) else 0,
+         action_id, json.dumps(m.get("action_params") or {}, ensure_ascii=False)),
     )
     conn.commit()
     conn.close()
@@ -103,8 +128,27 @@ def delete_monitor(mid):
     conn.close()
 
 
+def list_automation_events(limit: int = 100):
+    conn = db.get_metadata_conn()
+    rows = conn.execute(
+        "SELECT * FROM automation_events ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _log_event(rule: str, outcome: str, detail: str = ""):
+    conn = db.get_metadata_conn()
+    conn.execute(
+        "INSERT INTO automation_events (rule, outcome, detail, ts) VALUES (?,?,?,?)",
+        (rule, outcome, detail, _now()),
+    )
+    conn.commit()
+    conn.close()
+
+
 def check_monitor(mid):
-    """对单个监控执行检查：取值 + 阈值判定，违规写入活动日志。"""
+    """对单个监控执行检查：取值 + 阈值判定，命中则记录事件并触发关联动作。"""
     conn = db.get_metadata_conn()
     row = conn.execute("SELECT * FROM monitors WHERE id=?", (mid,)).fetchone()
     conn.close()
@@ -122,14 +166,34 @@ def check_monitor(mid):
             agg = m["metric"].split(":", 1)[0]
             value = float(dconn.execute(f'SELECT {agg}("{col}") FROM {ot["backing_table"]}').fetchone()[0] or 0)
     except Exception as e:
+        _log_event(m["name"], "error", str(e))
         return {"monitor": mid, "status": "error", "error": str(e)}
     finally:
         dconn.close()
     breached = {"gt": value > m["threshold"], "lt": value < m["threshold"], "gte": value >= m["threshold"], "lte": value <= m["threshold"]}.get(m["op"], False)
     metadata.log_activity("monitor",
                           f"监控 {m['name']}：{m['metric']} = {value:.2f}（阈值 {m['op']} {m['threshold']:g}）" + (" ⚠ 告警" if breached else " ✓ 正常"))
+    # E1：命中 → 记录事件 + 自动执行关联动作（固定参数）
+    if breached:
+        detail = f"{m['metric']} = {value:.2f}（阈值 {m['op']} {m['threshold']:g}）"
+        act_note = ""
+        if m.get("action_id"):
+            try:
+                from .ontology import actions as _actions
+                params = json.loads(m.get("action_params") or "{}")
+                r = _actions.execute_action(m["action_id"], params)
+                act_note = f"，自动执行动作 {m['action_id']} → {r}"
+                _log_event(m["name"], "executed", detail + act_note)
+            except Exception as e:
+                act_note = f"，自动执行动作 {m['action_id']} 失败: {e}"
+                _log_event(m["name"], "failed", detail + act_note)
+        else:
+            _log_event(m["name"], "breached", detail)
+        return {"monitor": mid, "metric": m["metric"], "value": value, "threshold": m["threshold"],
+                "op": m["op"], "breached": True, "action_id": m.get("action_id"), "action_note": act_note}
+    _log_event(m["name"], "ok", f"{m['metric']} = {value:.2f}")
     return {"monitor": mid, "metric": m["metric"], "value": value, "threshold": m["threshold"],
-            "op": m["op"], "breached": breached}
+            "op": m["op"], "breached": False}
 
 
 def check_all_monitors():

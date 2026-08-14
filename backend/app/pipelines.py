@@ -30,18 +30,43 @@ def run_pipeline(pipeline: dict):
     try:
         functions.register_functions(dconn)  # 让步骤 SQL 可用 ont_* 函数库
         for i, step in enumerate(steps):
+            # D1：Python 转换步骤（step 带 python 键）
+            if step.get("python"):
+                from . import transforms_python
+                target = step.get("target")
+                if not target:
+                    raise ValueError(f"步骤 {i+1} Python 转换需要 target")
+                inp = step.get("input")
+                if not inp:
+                    raise ValueError(f"步骤 {i+1} Python 转换需要 input 表")
+                backing = f"ont__{target}"
+                if run_id is None:
+                    run_id = _begin_run(pipeline.get("id"))
+                snap_table = f"ont__{target}__snap_{run_id}"
+                try:
+                    dconn.execute(f'CREATE OR REPLACE TABLE "{snap_table}" AS SELECT * FROM "{backing}"')
+                    snapshots.append(snap_table)
+                except Exception:
+                    pass
+                res = transforms_python.run_transform(step["python"], f"ont__{inp}", backing, target)
+                results.append({"step": i + 1, "name": step.get("name", step["python"]),
+                                "target": target, "rows": res.get("rows")})
+                continue
             sql = (step.get("sql") or "").strip()
             if not sql:
                 raise ValueError(f"步骤 {i+1} 缺少 sql")
             target = step.get("target")
             if target:
                 backing = f"ont__{target}"
-                # 时间旅行快照：执行前备份旧版本（12378379 简化版）
+                # 时间旅行快照：执行前备份旧版本（首次运行 target 表不存在则跳过）
                 if run_id is None:
                     run_id = _begin_run(pipeline.get("id"))
                 snap_table = f"ont__{target}__snap_{run_id}"
-                dconn.execute(f'CREATE OR REPLACE TABLE "{snap_table}" AS SELECT * FROM "{backing}"')
-                snapshots.append(snap_table)
+                try:
+                    dconn.execute(f'CREATE OR REPLACE TABLE "{snap_table}" AS SELECT * FROM "{backing}"')
+                    snapshots.append(snap_table)
+                except Exception:
+                    pass
                 dconn.execute(f'CREATE OR REPLACE TABLE "{backing}" AS {sql}')
                 res = ingestion._register_from_table(
                     target, backing, f"管道 {pipeline.get('id')} 步骤 {i+1}: {step.get('name','')}"

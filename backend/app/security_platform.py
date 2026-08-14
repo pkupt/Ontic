@@ -107,7 +107,7 @@ def list_scans(object_type: str = ""):
 
 # ---- 审批流（69762283） ----
 def create_approval(requester: str, object_type: str, action_id: str, params: dict, note: str = ""):
-    if not metadata.get_action(action_id):
+    if not action_id.startswith("__branch_apply__:") and not metadata.get_action(action_id):
         raise ValueError("动作不存在")
     conn = db.get_metadata_conn()
     conn.execute(
@@ -152,11 +152,20 @@ def decide_approval(approval_id: int, reviewer: str, approve: bool):
         raise ValueError(f"该请求已处理（{d['status']}）")
     detail = None
     if approve:
-        try:
-            detail = actions.execute_action(d["action_id"], json.loads(d["params"]))
-        except ValueError as e:
-            conn.close()
-            raise ValueError(f"执行动作失败: {e}")
+        if d["action_id"].startswith("__branch_apply__:"):
+            # C2：分支 apply 审批（特殊动作类型）
+            from . import versioning
+            try:
+                detail = versioning.apply_branch(int(d["action_id"].split(":")[1]))
+            except ValueError as e:
+                conn.close()
+                raise ValueError(f"应用分支失败: {e}")
+        else:
+            try:
+                detail = actions.execute_action(d["action_id"], json.loads(d["params"]))
+            except ValueError as e:
+                conn.close()
+                raise ValueError(f"执行动作失败: {e}")
         new_status = "approved"
     else:
         new_status = "rejected"

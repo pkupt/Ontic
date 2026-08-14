@@ -3,3 +3,4 @@ uvicorn>=0.27
 duckdb>=0.10
 pyjwt>=2.8
 python-multipart>=0.0.9
+cryptography>=41.0

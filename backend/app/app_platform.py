@@ -18,7 +18,7 @@ def _now():
     return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-_APP_TYPES = ("form", "dashboard", "view", "workflow")
+_APP_TYPES = ("form", "dashboard", "view", "workflow", "kanban")
 
 
 def create_app(defn: dict) -> dict:
@@ -26,7 +26,7 @@ def create_app(defn: dict) -> dict:
     typ = defn.get("type")
     otid = defn.get("object_type")
     if not aid or typ not in _APP_TYPES:
-        raise ValueError("id 必填且 type 须为 form/dashboard/view/workflow")
+        raise ValueError("id 必填且 type 须为 form/dashboard/view/workflow/kanban")
     if not metadata.get_object_type(otid):
         raise ValueError(f"对象类型不存在: {otid}")
     config = defn.get("config") or {}
@@ -35,13 +35,25 @@ def create_app(defn: dict) -> dict:
     now = _now()
     conn = db.get_metadata_conn()
     conn.execute(
-        """INSERT OR REPLACE INTO apps (id, name, description, type, object_type, config, created, updated)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (aid, defn.get("name", aid), defn.get("description", ""), typ, otid, config, now, now),
+        """INSERT OR REPLACE INTO apps (id, name, description, type, object_type, config, created, updated, project_id)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (aid, defn.get("name", aid), defn.get("description", ""), typ, otid, config, now, now, defn.get("project_id")),
     )
     conn.commit()
     conn.close()
     return {"ok": True, "id": aid, "type": typ, "object_type": otid}
+
+
+def list_apps(project_id: str = None):
+    conn = db.get_metadata_conn()
+    if project_id and project_id != "default":
+        rows = conn.execute("SELECT id, name, description, type, object_type, created, updated, project_id FROM apps WHERE project_id=? ORDER BY updated DESC", (project_id,)).fetchall()
+    elif project_id == "default":
+        rows = conn.execute("SELECT id, name, description, type, object_type, created, updated, project_id FROM apps WHERE project_id IS NULL OR project_id='default' ORDER BY updated DESC").fetchall()
+    else:
+        rows = conn.execute("SELECT id, name, description, type, object_type, created, updated, project_id FROM apps ORDER BY updated DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_app(aid):
@@ -58,19 +70,33 @@ def get_app(aid):
     return d
 
 
-def list_apps():
-    conn = db.get_metadata_conn()
-    rows = conn.execute("SELECT id, name, description, type, object_type, created, updated FROM apps ORDER BY updated DESC").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
 def delete_app(aid):
     conn = db.get_metadata_conn()
     conn.execute("DELETE FROM apps WHERE id=?", (aid,))
     conn.execute("DELETE FROM app_versions WHERE app_id=?", (aid,))
     conn.commit()
     conn.close()
+
+
+def update_app(aid, defn: dict):
+    """编辑保存：更新名称/描述/配置，并生成版本快照（复用版本机制）。"""
+    if not get_app(aid):
+        raise ValueError("应用不存在")
+    config = defn.get("config")
+    if config is None:
+        config = get_app(aid).get("config")
+    if isinstance(config, (dict, list)):
+        config = json.dumps(config, ensure_ascii=False)
+    now = _now()
+    conn = db.get_metadata_conn()
+    conn.execute(
+        "UPDATE apps SET name=?, description=?, config=?, updated=? WHERE id=?",
+        (defn.get("name", aid), defn.get("description", ""), config, now, aid),
+    )
+    conn.commit()
+    conn.close()
+    ver = save_version(aid)
+    return {"ok": True, "id": aid, "version": ver}
 
 
 # ---- 版本快照与对比（17326356 / 7735061） ----
@@ -150,6 +176,10 @@ def app_data(app):
             q = {"where": cfg.get("where"), "limit": int(cfg.get("limit", 200))}
             if cfg.get("orderBy"):
                 q["orderBy"] = cfg["orderBy"]
+            rows = resolver.query_object_set(otid, q)
+        elif typ == "kanban":
+            # 看板：返回全量对象行（含分组字段），前端按列渲染
+            q = {"where": cfg.get("where"), "limit": int(cfg.get("limit", 500))}
             rows = resolver.query_object_set(otid, q)
         elif typ == "form":
             cards.append({"label": "COUNT", "value": int(dconn.execute(f"SELECT COUNT(*) FROM {backing}").fetchone()[0])})
@@ -238,25 +268,85 @@ render();
 </script>"""
         body = body.replace("__GROUP_BY__", _esc_json(str(cfg.get("group_by", "—")))).replace("__APP_ID__", app_id)
     elif app["type"] == "view":
+        ff = cfg.get("filter_field") or ""
         body = """  <div class="wrap">
-    <div class="bar"><input id="q" placeholder="关键字过滤…" style="max-width:260px;"/><button onclick="load()">查询</button><span id="cnt" class="muted"></span></div>
+    <div class="bar"><input id="q" placeholder="关键字过滤…" style="max-width:220px;"/><button onclick="load()">查询</button>
+      <select id="ff" onchange="onFF()" style="margin-left:8px;"></select><span id="cnt" class="muted"></span></div>
     <div id="tbl"></div>
   </div>
 <script>
+const FF = "__FILTER_FIELD__";
+const OBJ = new URLSearchParams(location.search).get("object_id");
+let FF_VAL = "";
 async function load(){
   const q = document.getElementById("q").value.trim().toLowerCase();
   const d = await apiJson("/api/apps/__APP_ID__/data");
   let rows = d.rows||[];
+  if(FF){
+    const opts = [...new Set(rows.map(r => r[FF]==null||r[FF]==="" ? "(空)" : String(r[FF])))];
+    document.getElementById("ff").innerHTML = '<option value="">'+esc('全部 '+FF)+'</option>' + opts.map(v=>'<option>'+esc(v)+'</option>').join("");
+  }
+  if(OBJ) rows = rows.filter(r => String(r.id)===String(OBJ));
+  if(FF_VAL) rows = rows.filter(r => String(r[FF]==null||r[FF]==="" ? "(空)" : r[FF]) === FF_VAL);
   if(q) rows = rows.filter(r => Object.values(r).some(v => String(v==null?"":v).toLowerCase().includes(q)));
-  document.getElementById("cnt").textContent = rows.length + " 行";
+  document.getElementById("cnt").textContent = rows.length + " 行" + (OBJ ? "（定位对象 #"+esc(OBJ)+"）" : "");
   if(!rows.length){ document.getElementById("tbl").innerHTML='<p class="muted">无结果</p>'; return; }
   const cols = Object.keys(rows[0]);
   document.getElementById("tbl").innerHTML = "<table><thead><tr>"+cols.map(c=>'<th>'+esc(c)+'</th>').join("")+"</tr></thead><tbody>" +
-    rows.map(r=>'<tr>'+cols.map(c=>'<td>'+esc(r[c])+'</td>').join("")+'</tr>').join("")+"</tbody></table>";
+    rows.map(r=>'<tr'+(OBJ&&String(r.id)===String(OBJ)?' style="background:#fff3cd;"':'')+'>'+cols.map(c=>'<td>'+esc(r[c])+'</td>').join("")+'</tr>').join("")+"</tbody></table>";
 }
+function onFF(){ FF_VAL = document.getElementById("ff").value; load(); }
 load();
 </script>"""
-        body = body.replace("__APP_ID__", app_id)
+        body = body.replace("__APP_ID__", app_id).replace("__FILTER_FIELD__", _esc_json(ff))
+    elif app["type"] == "kanban":
+        # 看板（autopilot workbench-kanban）：列=状态值，卡片=对象，点卡片看详情
+        gb = cfg.get("group_by") or "status"
+        fields = cfg.get("card_fields") or []
+        body = """  <div class="wrap">
+    <div class="bar"><b>📋 看板 · __TITLE__</b> <span id="cnt" class="muted"></span></div>
+    <div id="board" style="display:flex;gap:12px;align-items:flex-start;overflow-x:auto;padding-bottom:8px;"></div>
+    <div id="detail"></div>
+  </div>
+<script>
+const GB = "__GROUP_BY__";
+const FIELDS = __FIELDS_JSON__;
+const OBJ = new URLSearchParams(location.search).get("object_id");
+let CACHE = [];
+async function load(){
+  const d = await apiJson("/api/apps/__APP_ID__/data");
+  CACHE = d.rows||[];
+  document.getElementById("cnt").textContent = CACHE.length + " 个对象";
+  const cols = {};
+  CACHE.forEach(r => { const v = r[GB]==null||r[GB]==="" ? "未设置" : String(r[GB]); (cols[v]=cols[v]||[]).push(r); });
+  const board = document.getElementById("board");
+  board.innerHTML = Object.keys(cols).map(k =>
+    '<div style="min-width:250px;background:#f2f4f7;border:1px solid #e3e5ea;border-radius:10px;padding:10px;">' +
+    '<div style="font-weight:700;margin-bottom:8px;display:flex;justify-content:space-between;">'+esc(k)+' <span class="muted">('+cols[k].length+')</span></div>' +
+    cols[k].map(r => {
+      const t0 = FIELDS[0] || "id";
+      const title = r[t0]!=null ? esc(String(r[t0])) : esc(String(r.id));
+      const extra = FIELDS.slice(1).map(f => '<div class="muted" style="font-size:12px;">'+esc(f)+': '+esc(r[f]==null?"—":String(r[f]))+'</div>').join("");
+      return '<div class="kcard'+(OBJ&&String(r.id)===String(OBJ)?' kcard-on':'')+'" onclick="showDetail('+JSON.stringify(r.id)+')">'+
+        '<div style="font-weight:600;">'+title+'</div>'+extra+'</div>';
+    }).join("") + '</div>').join("");
+}
+async function showDetail(id){
+  const row = CACHE.find(r => String(r.id)===String(id));
+  if(!row){ return; }
+  const keys = Object.keys(row);
+  document.getElementById("detail").innerHTML = '<div class="panel"><h3>对象详情 #'+esc(String(id))+'</h3>'+
+    '<table><tbody>'+keys.map(k => '<tr><td>'+esc(k)+'</td><td>'+esc(row[k]==null?"—":String(row[k]))+'</td></tr>').join("")+'</tbody></table></div>';
+}
+load();
+</script>
+<style>
+.kcard{ background:#fff; border:1px solid #e3e5ea; border-radius:8px; padding:8px 10px; margin-bottom:8px; cursor:pointer; box-shadow:0 1px 2px rgba(0,0,0,.05); }
+.kcard:hover{ border-color:#4f8cff; }
+.kcard-on{ border-color:#4f8cff !important; box-shadow:0 0 0 2px rgba(79,140,255,.25); }
+</style>"""
+        body = body.replace("__TITLE__", _esc_json(str(title))).replace("__GROUP_BY__", _esc_json(gb)) \
+                   .replace("__FIELDS_JSON__", _esc_json(fields)).replace("__APP_ID__", app_id)
     else:  # workflow
         steps = cfg.get("steps") or []
         body = """  <div class="wrap">

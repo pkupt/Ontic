@@ -314,6 +314,99 @@ def list_objectives():
     return [dict(r) for r in rows]
 
 
+# ---- A1 AIP 会话（Threads：多轮记忆 + 会话管理） ----
+def create_thread(username: str, name: str = "新会话"):
+    conn = db.get_metadata_conn()
+    conn.execute("INSERT INTO threads (name, username, created, updated) VALUES (?,?,?,?)",
+                 (name or "新会话", username, _now(), _now()))
+    tid = conn.execute("SELECT last_insert_rowid() AS i").fetchone()["i"]
+    conn.commit()
+    conn.close()
+    return {"thread_id": tid, "name": name or "新会话"}
+
+
+def list_threads(username: str):
+    conn = db.get_metadata_conn()
+    rows = conn.execute(
+        "SELECT id, name, created, updated FROM threads WHERE username=? ORDER BY updated DESC",
+        (username,),
+    ).fetchall()
+    cnt = {dict(r)["thread_id"]: dict(r)["n"] for r in conn.execute(
+        "SELECT thread_id, count(*) AS n FROM thread_messages GROUP BY thread_id").fetchall()}
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["messages"] = int(cnt.get(d["id"], 0))
+        out.append(d)
+    return out
+
+
+def get_messages(tid: int, username: str):
+    _check_thread(tid, username)
+    conn = db.get_metadata_conn()
+    rows = conn.execute(
+        "SELECT role, content, ts FROM thread_messages WHERE thread_id=? ORDER BY id", (tid,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def thread_chat(tid: int, username: str, message: str):
+    _check_thread(tid, username)
+    conn = db.get_metadata_conn()
+    conn.execute("INSERT INTO thread_messages (thread_id, role, content, ts) VALUES (?,?,?,?)",
+                 (tid, "user", message, _now()))
+    conn.commit()
+    conn.close()
+    res = aip.chat(message, None)
+    reply = res.get("reply", "")
+    conn = db.get_metadata_conn()
+    conn.execute("INSERT INTO thread_messages (thread_id, role, content, ts) VALUES (?,?,?,?)",
+                 (tid, "agent", reply, _now()))
+    conn.execute("UPDATE threads SET updated=? WHERE id=?", (_now(), tid))
+    conn.commit()
+    conn.close()
+    aip_platform_log_usage(username, message, reply, "chat")
+    return {"thread_id": tid, "reply": reply, "tool": res.get("tool"), "args": res.get("args"),
+            "result": res.get("result")}
+
+
+def rename_thread(tid: int, username: str, name: str):
+    _check_thread(tid, username)
+    conn = db.get_metadata_conn()
+    conn.execute("UPDATE threads SET name=? WHERE id=?", (name, tid))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+def delete_thread(tid: int, username: str):
+    _check_thread(tid, username)
+    conn = db.get_metadata_conn()
+    conn.execute("DELETE FROM thread_messages WHERE thread_id=?", (tid,))
+    conn.execute("DELETE FROM threads WHERE id=?", (tid,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+def _check_thread(tid: int, username: str):
+    conn = db.get_metadata_conn()
+    row = conn.execute("SELECT username FROM threads WHERE id=?", (tid,)).fetchone()
+    conn.close()
+    if not row:
+        raise ValueError("会话不存在")
+    if row["username"] != username:
+        raise ValueError("无权访问该会话")
+
+
+def aip_platform_log_usage(username, message, reply, source):
+    log_usage("ontic-rule-planner", "request", 1, True, source=source,
+              payload={"user": username, "message": message[:200]})
+    log_usage("ontic-rule-planner", "token", max(4, len(message) // 4) + len(reply) // 4, True, source=source)
+
+
 # ---- 模型对比 Playground（84211570） ----
 def playground(prompt: str, model_a: str, model_b: str):
     """两模型并行推理：A 用本地规则规划器真实作答；B 为 LLM（配置 key 后真实，否则占位）。"""
