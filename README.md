@@ -37,7 +37,8 @@
 | 分析与 SQL | SQL 工作台(只读白名单) + 仪表盘聚合 + 对象集过滤 |
 | 安全与治理 | ABAC(用户/授权) + 敏感数据扫描 + 审批流 + 留存策略 + 安全标记 + 字段脱敏 |
 | 运维与监控 | 数据血缘图 + 监控规则 + 事件时间线 + 活动日志 |
-| 数据能力 | 空间邻近查询 + 媒体存储 + 时间序列趋势 |
+| 数据能力 | 空间邻近查询 + 媒体存储 + 时间序列趋势 + 资源管理器(Compass) + **数据版本控制(检查点/分支)** |
+| 数据质量 | **字段约束：必填 / 枚举 / 正则（动作执行时校验）** |
 | 开发者 | OSDK + API 令牌 + API 参考 + 自定义端点 + 市场 |
 | 发布与分发 | 市场模板 + 审批 |
 
@@ -76,13 +77,18 @@ cd backend && uvicorn app.main:app --reload --port 8000
 
 - **所有密钥/密码均通过环境变量注入**（见 `.env.example`），代码库内无任何硬编码凭据；
   `data/`（SQLite 元数据 + DuckDB 数据平面 + 媒体）已被 `.gitignore` 排除，**不会进入版本库**。
-- 生产部署必须设置：`ONTIC_SECRET_KEY`（JWT 签名，默认值仅用于本地开发）。
+- 生产部署必须设置：`ONTIC_SECRET_KEY`（JWT 签名，默认值仅用于本地开发，启动时若未修改会告警）。
+- **Python Transforms 是危险功能**：管道支持用户提交 Python 代码在服务端执行，已加 admin 限制 + 受限 builtins 沙箱（移除 `__import__`/`open`/`exec` 等）。纯 Python 沙箱非 100% 安全，**生产环境应容器化隔离执行**。
+- 启动时自动检测默认弱密码（admin/admin123）并告警，不阻断启动。
+- CORS 默认仅允许本机（3000/5173），可通过 `ONTIC_CORS_ORIGINS` 配置白名单。
+- 完整安全审计见 [SECURITY-AUDIT.md](./SECURITY-AUDIT.md)。
 - 可选配置：
   | 变量 | 说明 |
   |---|---|
   | `ONTIC_LLM_API_KEY` / `ONTIC_LLM_BASE_URL` / `ONTIC_LLM_MODEL` | 启用真实 LLM（OpenAI 兼容：SiliconFlow/DeepSeek/vLLM/Ollama）。未配置时 AIP 自动降级为规则规划器，Playground 的 B 端返回占位 |
   | `ONTIC_TOKEN_TTL` | JWT 有效期（分钟，默认 1440） |
   | `ONTIC_ADMIN_USER` / `ONTIC_ADMIN_PASSWORD` | 初始管理员 |
+  | `ONTIC_CORS_ORIGINS` | CORS 白名单（逗号分隔，默认 `http://localhost:3000,http://localhost:5173`） |
 
 ## 核心 API（节选）
 | 方法 | 路径 | 说明 |

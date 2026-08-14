@@ -140,6 +140,14 @@ def run_postgres(object_type_id: str, config: dict):
     password = config.get("password"); table = config.get("table")
     if not all([host, dbname, user, table]):
         raise ValueError("Postgres 连接器需要 host/dbname/user/table")
+    # SQL 注入防护：禁止单引号/双引号/分号/反斜杠/注释符；端口必须数字
+    import re as _re
+    _INJECT_RE = _re.compile(r"['\";\\]|--")
+    for name, val in (("host", host), ("dbname", dbname), ("user", user), ("table", table)):
+        if _INJECT_RE.search(str(val)):
+            raise ValueError(f"Postgres 参数 {name} 含 SQL 注入风险字符")
+    if not str(port).isdigit():
+        raise ValueError("Postgres 端口必须为数字")
     backing = f"ont__{object_type_id}"
     dconn = db.get_duckdb()
     try:
@@ -170,3 +178,89 @@ def dispatch(connector_type: str, object_type_id: str, primary_key: str = "id",
     if connector_type == "postgres":
         return run_postgres(object_type_id, config or {})
     raise ValueError("未实现")
+
+
+# ---- J3 连接器配置持久化（密码加密落库，data-connection 对齐） ----
+def init_configs_table():
+    conn = db.get_metadata_conn()
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS connector_configs (
+            id TEXT PRIMARY KEY,
+            connector_type TEXT NOT NULL,
+            object_type_id TEXT NOT NULL,
+            primary_key TEXT NOT NULL DEFAULT 'id',
+            config_enc TEXT NOT NULL,
+            created TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_config(cfg: dict) -> dict:
+    cid = (cfg.get("id") or "").strip()
+    ctype = cfg.get("connector_type")
+    if not cid or ctype not in REGISTRY:
+        raise ValueError("id 与 connector_type 必填且类型合法")
+    import datetime
+    from . import security
+    raw = dict(cfg.get("config") or {})
+    for k in ("password", "token", "api_key"):
+        if raw.get(k):
+            raw[k] = security.encrypt_secret(str(raw[k]))
+    conn = db.get_metadata_conn()
+    conn.execute(
+        """INSERT OR REPLACE INTO connector_configs (id, connector_type, object_type_id, primary_key, config_enc, created)
+           VALUES (?,?,?,?,?,?)""",
+        (cid, ctype, cfg.get("object_type_id", ""), cfg.get("primary_key", "id"),
+         json.dumps(raw, ensure_ascii=False),
+         datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": cid}
+
+
+def list_configs():
+    conn = db.get_metadata_conn()
+    rows = conn.execute("SELECT * FROM connector_configs ORDER BY id").fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        cfg = json.loads(d["config_enc"] or "{}")
+        # 敏感字段掩码展示
+        for k in ("password", "token", "api_key"):
+            if cfg.get(k):
+                cfg[k] = "••••" + cfg[k][-4:] if len(cfg[k]) > 4 else "••••"
+        d["config"] = cfg
+        d.pop("config_enc", None)
+        out.append(d)
+    return out
+
+
+def delete_config(cid: str):
+    conn = db.get_metadata_conn()
+    conn.execute("DELETE FROM connector_configs WHERE id=?", (cid,))
+    conn.commit()
+    conn.close()
+
+
+def run_config(cid: str):
+    """解密配置后执行接入。"""
+    conn = db.get_metadata_conn()
+    row = conn.execute("SELECT * FROM connector_configs WHERE id=?", (cid,)).fetchone()
+    conn.close()
+    if not row:
+        raise ValueError("连接配置不存在")
+    d = dict(row)
+    cfg = json.loads(d["config_enc"] or "{}")
+    from . import security
+    for k in ("password", "token", "api_key"):
+        if cfg.get(k) and str(cfg[k]).startswith("enc$"):
+            cfg[k] = security.decrypt_secret(str(cfg[k]))
+    res = dispatch(d["connector_type"], d["object_type_id"], d["primary_key"],
+                   None, None, cfg)
+    return {"config_id": cid, **res}

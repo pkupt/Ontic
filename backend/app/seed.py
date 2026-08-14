@@ -171,6 +171,161 @@ def seed():
         dconn.close()
         print("[seed] 已创建 city 对象类型（时空查询演示，8 行）。")
 
+    # ---- 补充 demo 数据：product + order + 多跳链接（让本体实例化与链接可视化有充足素材）----
+    PRODUCT_TYPE = {
+        "id": "product", "name": "Product", "description": "产品对象（订单关联）",
+        "backing_table": "ont__product", "primary_key": "id",
+        "properties": json.dumps([
+            {"key": "id", "column": "id", "type": "integer", "title": "ID"},
+            {"key": "name", "column": "name", "type": "string", "title": "名称"},
+            {"key": "category", "column": "category", "type": "string", "title": "品类"},
+            {"key": "price", "column": "price", "type": "double", "title": "价格"},
+            {"key": "stock", "column": "stock", "type": "integer", "title": "库存"},
+            {"key": "status", "column": "status", "type": "string", "title": "状态", "enum": ["active", "inactive"]},
+        ]),
+    }
+    if not metadata.get_object_type("product"):
+        metadata.create_object_type(PRODUCT_TYPE)
+        metadata.ensure_crud_actions("product", json.loads(PRODUCT_TYPE["properties"]))
+        dconn = db.get_duckdb()
+        dconn.execute(
+            "CREATE TABLE IF NOT EXISTS ont__product (id INTEGER PRIMARY KEY, name VARCHAR, category VARCHAR, price DOUBLE, stock INTEGER, status VARCHAR)"
+        )
+        _prod_rows = [
+            [1, "Foundry Starter", "软件", 9800.0, 120, "active"],
+            [2, "Ontic Pro", "软件", 19800.0, 85, "active"],
+            [3, "数据集成套件", "服务", 35000.0, 40, "active"],
+            [4, "AIP 分析师", "软件", 8800.0, 200, "active"],
+            [5, "安全审计包", "服务", 42000.0, 25, "active"],
+            [6, "管道构建器", "软件", 12800.0, 95, "active"],
+            [7, "运维监控", "软件", 6800.0, 150, "inactive"],
+            [8, "培训认证", "服务", 5800.0, 300, "active"],
+            [9, "开发者工具包", "软件", 3800.0, 220, "active"],
+            [10, "企业支持", "服务", 88000.0, 15, "active"],
+        ]
+        dconn.executemany("INSERT INTO ont__product VALUES (?,?,?,?,?,?)", _prod_rows)
+        dconn.close()
+        print("[seed] 已创建 product 对象类型（10 行）。")
+    else:
+        # 已存在：确保 category/status 列 + 补齐 id 4-10（order 需要关联到这些产品）
+        dconn = db.get_duckdb()
+        cols = {r[1] for r in dconn.execute("PRAGMA table_info(ont__product)").fetchall()}
+        for col, typ in (("category", "VARCHAR"), ("status", "VARCHAR")):
+            if col not in cols:
+                try:
+                    dconn.execute(f"ALTER TABLE ont__product ADD COLUMN {col} {typ}")
+                except Exception:
+                    pass
+        # ALTER 后重新查列，按现有列动态对齐插入
+        avail = [r[1] for r in dconn.execute("PRAGMA table_info(ont__product)").fetchall()]
+        existing = {r[0] for r in dconn.execute("SELECT id FROM ont__product").fetchall()}
+        for pdata in [
+            {"id":4,"name":"AIP 分析师","category":"软件","price":8800.0,"stock":200,"status":"active"},
+            {"id":5,"name":"安全审计包","category":"服务","price":42000.0,"stock":25,"status":"active"},
+            {"id":6,"name":"管道构建器","category":"软件","price":12800.0,"stock":95,"status":"active"},
+            {"id":7,"name":"运维监控","category":"软件","price":6800.0,"stock":150,"status":"inactive"},
+            {"id":8,"name":"培训认证","category":"服务","price":5800.0,"stock":300,"status":"active"},
+            {"id":9,"name":"开发者工具包","category":"软件","price":3800.0,"stock":220,"status":"active"},
+            {"id":10,"name":"企业支持","category":"服务","price":88000.0,"stock":15,"status":"active"},
+        ]:
+            if pdata["id"] not in existing:
+                use = [c for c in avail if c in pdata]
+                ph = ",".join(["?"] * len(use))
+                dconn.execute(f"INSERT INTO ont__product ({','.join(use)}) VALUES ({ph})", [pdata[c] for c in use])
+        dconn.close()
+        print(f"[seed] product 已存在，补齐至 {len(existing | {4,5,6,7,8,9,10})} 行。")
+
+    ORDER_TYPE = {
+        "id": "order", "name": "Order", "description": "订单对象（关联客户与产品，多跳链接演示）",
+        "backing_table": "ont__order", "primary_key": "id",
+        "properties": json.dumps([
+            {"key": "id", "column": "id", "type": "integer", "title": "ID"},
+            {"key": "customer_id", "column": "customer_id", "type": "integer", "title": "客户ID"},
+            {"key": "product_id", "column": "product_id", "type": "integer", "title": "产品ID"},
+            {"key": "amount", "column": "amount", "type": "double", "title": "金额"},
+            {"key": "qty", "column": "qty", "type": "integer", "title": "数量"},
+            {"key": "status", "column": "status", "type": "string", "title": "状态", "enum": ["pending", "paid", "shipped", "done"]},
+        ]),
+    }
+    if not metadata.get_object_type("order"):
+        metadata.create_object_type(ORDER_TYPE)
+        metadata.ensure_crud_actions("order", json.loads(ORDER_TYPE["properties"]))
+        dconn = db.get_duckdb()
+        dconn.execute(
+            "CREATE TABLE IF NOT EXISTS ont__order (id INTEGER PRIMARY KEY, customer_id INTEGER, product_id INTEGER, amount DOUBLE, qty INTEGER, status VARCHAR)"
+        )
+        _order_rows = [
+            [1, 1, 1, 9800.0, 1, "done"], [2, 1, 4, 17600.0, 2, "shipped"],
+            [3, 2, 2, 19800.0, 1, "paid"], [4, 2, 6, 12800.0, 1, "paid"],
+            [5, 3, 8, 11600.0, 2, "pending"], [6, 3, 9, 7600.0, 2, "pending"],
+            [7, 4, 3, 35000.0, 1, "done"], [8, 4, 5, 42000.0, 1, "shipped"],
+            [9, 1, 10, 88000.0, 1, "paid"], [10, 2, 9, 3800.0, 1, "done"],
+            [11, 3, 1, 9800.0, 1, "shipped"], [12, 4, 4, 8800.0, 1, "pending"],
+            [13, 1, 6, 12800.0, 1, "done"], [14, 2, 8, 5800.0, 1, "paid"],
+            [15, 4, 2, 19800.0, 1, "shipped"],
+        ]
+        dconn.executemany("INSERT INTO ont__order VALUES (?,?,?,?,?,?)", _order_rows)
+        dconn.close()
+        print("[seed] 已创建 order 对象类型（15 行）。")
+    else:
+        # 已存在：补齐 qty/status 列 + 补缺失订单行（动态列对齐）
+        dconn = db.get_duckdb()
+        cols = {r[1] for r in dconn.execute("PRAGMA table_info(ont__order)").fetchall()}
+        for col, typ in (("qty", "INTEGER"), ("status", "VARCHAR")):
+            if col not in cols:
+                try:
+                    dconn.execute(f"ALTER TABLE ont__order ADD COLUMN {col} {typ}")
+                except Exception:
+                    pass
+        avail = [r[1] for r in dconn.execute("PRAGMA table_info(ont__order)").fetchall()]
+        existing = {r[0] for r in dconn.execute("SELECT id FROM ont__order").fetchall()}
+        for pdata in [
+            {"id":1,"customer_id":1,"product_id":1,"amount":9800.0,"qty":1,"status":"done"},
+            {"id":2,"customer_id":1,"product_id":4,"amount":17600.0,"qty":2,"status":"shipped"},
+            {"id":3,"customer_id":2,"product_id":2,"amount":19800.0,"qty":1,"status":"paid"},
+            {"id":4,"customer_id":2,"product_id":6,"amount":12800.0,"qty":1,"status":"paid"},
+            {"id":5,"customer_id":3,"product_id":8,"amount":11600.0,"qty":2,"status":"pending"},
+            {"id":6,"customer_id":3,"product_id":9,"amount":7600.0,"qty":2,"status":"pending"},
+            {"id":7,"customer_id":4,"product_id":3,"amount":35000.0,"qty":1,"status":"done"},
+            {"id":8,"customer_id":4,"product_id":5,"amount":42000.0,"qty":1,"status":"shipped"},
+            {"id":9,"customer_id":1,"product_id":10,"amount":88000.0,"qty":1,"status":"paid"},
+            {"id":10,"customer_id":2,"product_id":9,"amount":3800.0,"qty":1,"status":"done"},
+            {"id":11,"customer_id":3,"product_id":1,"amount":9800.0,"qty":1,"status":"shipped"},
+            {"id":12,"customer_id":4,"product_id":4,"amount":8800.0,"qty":1,"status":"pending"},
+            {"id":13,"customer_id":1,"product_id":6,"amount":12800.0,"qty":1,"status":"done"},
+            {"id":14,"customer_id":2,"product_id":8,"amount":5800.0,"qty":1,"status":"paid"},
+            {"id":15,"customer_id":4,"product_id":2,"amount":19800.0,"qty":1,"status":"shipped"},
+        ]:
+            if pdata["id"] not in existing:
+                use = [c for c in avail if c in pdata]
+                ph = ",".join(["?"] * len(use))
+                dconn.execute(f"INSERT INTO ont__order ({','.join(use)}) VALUES ({ph})", [pdata[c] for c in use])
+        n = dconn.execute("SELECT count(*) FROM ont__order").fetchone()[0]
+        dconn.close()
+        print(f"[seed] order 已存在，补齐至 {n} 行。")
+
+    # 链接：order→customer（order.customer_id 引用 customer.id）
+    if not metadata.get_link_type("order_customer"):
+        metadata.create_link_type({
+            "id": "order_customer", "name": "Order Customer",
+            "source_type": "order", "target_type": "customer", "source_fk": "customer_id",
+        })
+    # 链接：order→product（order.product_id 引用 product.id）
+    if not metadata.get_link_type("order_product"):
+        metadata.create_link_type({
+            "id": "order_product", "name": "Order Product",
+            "source_type": "order", "target_type": "product", "source_fk": "product_id",
+        })
+    # city→region 链接（时空+地区关联，丰富图探索）
+    if not metadata.get_link_type("city_region"):
+        metadata.create_link_type({
+            "id": "city_region", "name": "City Region",
+            "source_type": "city", "target_type": "region", "source_fk": "name",
+        })
+    _lk_n = len(metadata.list_link_types())
+    if _lk_n > 1:
+        print(f"[seed] 链接类型已就绪（共 {_lk_n} 个：customer→region / order→customer / order→product / city→region）。")
+
 
 if __name__ == "__main__":
     seed()

@@ -28,16 +28,21 @@
         <input id="omnibar" placeholder="搜索 类型 / 动作 / 应用 / 管道…" autocomplete="off" oninput="omnibarSearch()" onkeydown="omnibarKey(event)" onfocus="omnibarSearch()"/>
         <div id="omnibar-list" class="hidden"></div>
       </div>
-      <button id="bellBtn" class="ghost" onclick="openNotifications()" title="通知">🔔<span id="bellBadge" class="badge hidden"></span></button>
+      <button id="bellBtn" class="ghost" onclick="toggleBell(event)" title="通知">🔔<span id="bellBadge" class="badge hidden"></span></button>
+      <select id="projectSel" title="项目空间" onchange="setProject(this.value)" style="max-width:150px;"></select>
       <button class="primary sm" onclick="openLauncher()">＋ 新建</button>
       <span id="who" class="muted"></span>
       <button id="logoutBtn" class="ghost">退出</button>
     </header>
+    <div id="bell-pop" class="bell-pop hidden"></div>
     <div class="layout">
       <nav id="sidebar"></nav>
       <main id="content"></main>
     </div>
   </div>
+
+  <!-- 对象详情抽屉（P0 体验闭环：行可点 → 属性/动作/链接） -->
+  <div id="drawer" class="drawer hidden"></div>
 
   <!-- 新建启动器（对齐 Foundry 创建面板 9028755） -->
   <div id="launcher" class="modal hidden" onclick="if(event.target===this)closeLauncher()">

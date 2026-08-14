@@ -95,7 +95,7 @@ def transform_from_sql(name: str, sql: str):
 
 
 # M3 可视化建模：从字段定义直接创建对象类型（无需写代码/种子）
-_DUCK_TYPE = {"integer": "INTEGER", "double": "DOUBLE", "boolean": "BOOLEAN", "string": "VARCHAR"}
+_DUCK_TYPE = {"integer": "INTEGER", "double": "DOUBLE", "boolean": "BOOLEAN", "string": "VARCHAR", "date": "DATE", "timestamp": "TIMESTAMP", "geohash": "VARCHAR", "attachment": "VARCHAR"}
 
 
 def create_object_type_from_def(payload: dict):
@@ -123,7 +123,11 @@ def create_object_type_from_def(payload: dict):
         if key == pk:
             col += " PRIMARY KEY"
         cols.append(col)
-        props.append({"key": key, "column": key, "type": typ, "title": f.get("title", key)})
+        item = {"key": key, "column": key, "type": typ, "title": f.get("title", key)}
+        for k in ("required", "enum", "pattern", "sensitive"):
+            if f.get(k):
+                item[k] = f[k]
+        props.append(item)
 
     backing = f"ont__{oid}"
     dconn = db.get_duckdb()
@@ -139,6 +143,62 @@ def create_object_type_from_def(payload: dict):
         "backing_table": backing,
         "primary_key": pk,
         "properties": json.dumps(props),
+        "project_id": payload.get("project_id"),
     })
     metadata.ensure_crud_actions(oid, props, pk)
     return {"object_type": oid, "columns": len(props), "backing_table": backing}
+
+
+# ---- D2 对象类型导出 / 导入 / 克隆（备份与迁移） ----
+def export_object_type(type_id: str, include_data: bool = True):
+    ot = metadata.get_object_type(type_id)
+    if not ot:
+        raise ValueError("对象类型不存在")
+    props = json.loads(ot["properties"])
+    fields = []
+    for p in props:
+        f = {"key": p["key"], "type": p["type"], "title": p.get("title", p["key"])}
+        for k in ("required", "enum", "pattern", "sensitive"):
+            if p.get(k):
+                f[k] = p[k]
+        fields.append(f)
+    definition = {
+        "id": ot["id"], "name": ot.get("name"), "description": ot.get("description", ""),
+        "primary_key": ot["primary_key"], "fields": fields,
+    }
+    rows = []
+    if include_data:
+        dconn = db.get_duckdb()
+        try:
+            cur = dconn.execute(f'SELECT * FROM "{ot["backing_table"]}"')
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        finally:
+            dconn.close()
+    return {"definition": definition, "rows": rows}
+
+
+def import_object_type(definition: dict, rows: list = None):
+    res = create_object_type_from_def(definition)
+    oid = res["object_type"]
+    if rows:
+        dconn = db.get_duckdb()
+        try:
+            cur = dconn.execute(f'SELECT * FROM "ont__{oid}" LIMIT 0')
+            cols = [d[0] for d in cur.description]
+            dconn.executemany(
+                f'INSERT INTO "ont__{oid}" ({",".join(f'"{c}"' for c in cols)}) VALUES ({",".join(["?"]*len(cols))})',
+                [[r.get(c) for c in cols] for r in rows],
+            )
+        finally:
+            dconn.close()
+    return {"object_type": oid, "rows": len(rows or [])}
+
+
+def clone_object_type(src_id: str, new_id: str, include_data: bool = True):
+    data = export_object_type(src_id, include_data)
+    data["definition"]["id"] = new_id
+    data["definition"]["name"] = data["definition"].get("name") or new_id
+    res = import_object_type(data["definition"], data["rows"] if include_data else None)
+    metadata.log_activity("type", f"克隆对象类型 {src_id} → {new_id}")
+    return res

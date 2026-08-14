@@ -1,0 +1,27 @@
+# Ontic 反向代理示例（P0-6 · HTTPS/TLS 终结）
+# 用法：替换 <ontic.example.com> 与证书路径后，放入 /etc/nginx/conf.d/ontic.conf
+server {
+    listen 80;
+    server_name <ontic.example.com>;
+    return 301 https://$host$request_uri;   # 强制 HTTPS
+}
+
+server {
+    listen 443 ssl http2;
+    server_name <ontic.example.com>;
+
+    ssl_certificate     /etc/letsencrypt/live/<ontic.example.com>/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/<ontic.example.com>/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 50m;              # 媒体上传大小上限
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;  # 指向 docker-compose 映射端口
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;           # 长查询（SQL/AIP）超时放宽
+    }
+}

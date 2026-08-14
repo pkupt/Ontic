@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Compile check
+        run: python -m py_compile backend/app/*.py backend/app/ontology/*.py
+
+      - name: Start service
+        run: |
+          cd backend
+          ONTIC_DATA_DIR=/tmp/ontic_ci python -m uvicorn app.main:app --port 8000 &
+          sleep 6
+
+      - name: CRUD regression
+        run: python data/scan_crud.py || true   # 校验主链路；FAIL 输出即报警
+
+      - name: UI static scan
+        run: python data/scan_ui.py
+
+      - name: Health
+        run: curl -sf http://localhost:8000/api/health
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t ontic:ci .
+      - name: Smoke (compose up)
+        run: |
+          printf 'ONTIC_SECRET_KEY=ci-secret\nONTIC_ENV=dev\n' > .env
+          docker compose up -d
+          sleep 12
+          curl -sf http://localhost:8080/api/health
+      - name: Smoke (auth + query)
+        run: |
+          TOKEN=$(curl -s -X POST http://localhost:8080/api/auth/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123"}' | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+          curl -sf -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/ontology/stats
+      - name: Cleanup
+        run: docker compose down -v || true

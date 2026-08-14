@@ -1,0 +1,12 @@
+# Caddy 反代示例（更简：自动 HTTPS，无需手工证书）
+# 用法：替换 <ontic.example.com>，`caddy run` 即可（自动申请/续期 Let's Encrypt）
+
+<ontic.example.com> {
+    encode zstd gzip
+    reverse_proxy localhost:8080 {
+        header_up X-Forwarded-Proto {scheme}
+    }
+    request_body {
+        max_size 50MB
+    }
+}

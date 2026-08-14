@@ -105,16 +105,41 @@ _STATUS_WORDS = {"active": "active", "活跃": "active", "inactive": "inactive",
 
 
 def _resolve_type(msg: str, types: list):
-    """从消息里解析出命中的对象类型 id（支持英文 id/name 与中文别名）。"""
+    """从消息里解析出命中的对象类型 id（最长匹配优先，避免 purchase_order 被 order 截胡）。"""
     low = msg.lower()
     by_id = {t["id"].lower(): t["id"] for t in types}
+    cands = []
     for t in types:
-        if t["id"].lower() in low or (t.get("name") or "").lower() in low:
-            return t["id"]
+        if t["id"].lower() in low:
+            cands.append((2, len(t["id"]), t["id"]))  # id 匹配权重更高
+    if not cands:
+        for t in types:
+            if (t.get("name") or "").lower() in low:
+                cands.append((1, len(t.get("name") or ""), t["id"]))
+    if cands:
+        cands.sort(key=lambda x: (-x[0], -x[1]))
+        return cands[0][2]
     for alias, tid in _ALIASES.items():
         if alias in msg and tid in by_id:
             return tid
     return None
+
+
+def _resolve_types(msg: str, types: list):
+    """解析出消息里命中的全部对象类型（最长优先 + 去子串嵌套，支持链式多类型查询）。"""
+    low = msg.lower()
+    raw = []
+    for t in types:
+        if t["id"].lower() in low:
+            raw.append((len(t["id"]), t["id"]))
+        elif (t.get("name") or "").lower() in low:
+            raw.append((len(t.get("name") or ""), t["id"]))
+    # 去子串嵌套：purchase_order 命中时不再额外命中 order
+    out = [rid for ln, rid in raw if not any(other_ln > ln and rid in other_rid for other_ln, other_rid in raw)]
+    for alias, tid in _ALIASES.items():
+        if alias in msg and tid not in out and any(t["id"] == tid for t in types):
+            out.append(tid)
+    return list(dict.fromkeys(out))
 
 
 def _rule_plan(message: str, types: list):
@@ -125,17 +150,22 @@ def _rule_plan(message: str, types: list):
     if any(k in msg for k in ("帮助", "help", "能做什么", "你会", "功能", "怎么用")):
         return {"tool": "__help__", "args": {}}
 
-    hit = _resolve_type(msg, types)
-    if hit:
-        ot = next((t for t in types if t["id"] == hit), None)
-        props = {p["key"] for p in json.loads(ot["properties"])} if ot else set()
-        where = None
-        if "status" in props:
-            for w, val in _STATUS_WORDS.items():
-                if w in msg:
-                    where = {"op": "eq", "field": "status", "value": val}
-                    break
-        return {"tool": "query_object_set", "args": {"type_id": hit, "where": where, "limit": 50}}
+    hits = _resolve_types(msg, types)
+    if hits:
+        plans = []
+        for hit in hits:
+            ot = next((t for t in types if t["id"] == hit), None)
+            props = {p["key"] for p in json.loads(ot["properties"])} if ot else set()
+            where = None
+            if "status" in props:
+                for w, val in _STATUS_WORDS.items():
+                    if w in msg:
+                        where = {"op": "eq", "field": "status", "value": val}
+                        break
+            plans.append({"tool": "query_object_set", "args": {"type_id": hit, "where": where, "limit": 50}})
+        if len(plans) > 1:
+            return {"tool": "__multi__", "args": {"plans": plans}}
+        return plans[0]
     return {"tool": "__help__", "args": {}}
 
 
@@ -223,14 +253,27 @@ def _llm_plan(message: str, types: list):
     return None
 
 
-def chat(message: str, history=None):
-    """聊天入口：LLM 优先（若有 key），否则规则；最终都落到 dispatch_tool。"""
+def chat(message: str, history=None, allowed_tools: list = None):
+    """聊天入口：LLM 优先（若有 key），否则规则；最终都落到 dispatch_tool。
+    allowed_tools：Chatbot Studio 工具集白名单（None=全部工具）。"""
     types = metadata.list_object_types()
     plan = _llm_plan(message, types) or _rule_plan(message, types)
     tool, args = plan["tool"], plan.get("args", {})
 
     if tool == "__help__":
         return {"reply": _HELP, "tool": None, "args": None, "result": None}
+    if tool == "__multi__":
+        parts = []
+        results = []
+        for p in args.get("plans", []):
+            if allowed_tools and p["tool"] not in allowed_tools:
+                continue
+            r = dispatch_tool(p["tool"], p.get("args", {}))
+            parts.append(_format_result(p["tool"], p.get("args", {}), r))
+            results.append({"tool": p["tool"], "args": p.get("args", {}), "result": r})
+        return {"reply": "\n\n".join(parts), "tool": "__multi__", "args": args, "result": results}
+    if allowed_tools and tool not in allowed_tools:
+        return {"reply": "该 Chatbot 未装配此工具。", "tool": tool, "args": args, "result": None}
 
     result = dispatch_tool(tool, args)
     reply = _format_result(tool, args, result)
